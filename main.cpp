@@ -20,13 +20,17 @@ using Buffer = std::array<std::uint8_t, 4 * 1024>;
 
 constexpr std::uint8_t SOCKS_VER = 5;
 constexpr std::uint8_t RESERVED_FIELD = 0;
-constexpr std::uint8_t NO_AUTH_REQ = 0;
 
 enum class State {
     Greeting,
     Request,
     Transfer,
     EndOfSession
+};
+
+enum AuthMethod : std::uint8_t {
+    NoAuthRequired = 0,
+    UserNamePassword = 2
 };
 
 enum CmdType : std::uint8_t {
@@ -78,12 +82,12 @@ State onGreeting(Buffer &data, std::size_t &length) {
         return State::EndOfSession;
     }
     data[0] = SOCKS_VER;
-    data[1] = NO_AUTH_REQ;
+    data[1] = AuthMethod::NoAuthRequired;
     length = 2;
     return State::Request;
 }
 
-net::awaitable<std::tuple<State, std::unique_ptr<tcp::socket>>> onRequest(const net::any_io_executor &executor,
+net::awaitable<std::tuple<State, std::unique_ptr<tcp::socket>>> onRequest(const tcp::socket::executor_type &executor,
                                                                           const tcp::endpoint &serverEndpoint,
                                                                           Buffer &data,
                                                                           std::size_t &length) {
