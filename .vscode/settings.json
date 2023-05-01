@@ -1,0 +1,5 @@
+{
+    "cmake.configureSettings": {
+        "CMAKE_TOOLCHAIN_FILE": "/home/vadim/vcpkg/scripts/buildsystems/vcpkg.cmake"
+    }
+}

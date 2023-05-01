@@ -1,0 +1,7 @@
+{
+  "name": "boost-asio-socks5",
+  "version-string": "0.1.0",
+  "dependencies": [
+    "boost-asio"
+  ]
+}
