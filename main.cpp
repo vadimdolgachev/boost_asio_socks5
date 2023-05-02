@@ -47,11 +47,11 @@ enum AddressType : std::uint8_t {
 
 enum ReplyCode : std::uint8_t {
     Succeeded = 0,
-    HostUnreachable,
-    NetworkUnreachable,
-    ConnectionRefused,
-    CommandNotSupported,
-    AddressTypeNotSupported
+    NetworkUnreachable = 3,
+    HostUnreachable = 4,
+    ConnectionRefused = 5,
+    CommandNotSupported = 7,
+    AddressTypeNotSupported = 8
 };
 
 net::awaitable<void> listen(tcp::acceptor &acceptor);
