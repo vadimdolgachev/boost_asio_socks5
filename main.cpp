@@ -46,7 +46,12 @@ enum AddressType : std::uint8_t {
 };
 
 enum ReplyCode : std::uint8_t {
-    Succeeded = 0
+    Succeeded = 0,
+    HostUnreachable,
+    NetworkUnreachable,
+    ConnectionRefused,
+    CommandNotSupported,
+    AddressTypeNotSupported
 };
 
 net::awaitable<void> listen(tcp::acceptor &acceptor);
@@ -58,8 +63,7 @@ int main() {
         tcp::acceptor acceptor(ioContext, tcp::endpoint(tcp::v4(), 10800));
         net::co_spawn(ioContext, listen(acceptor), net::detached);
         ioContext.run();
-    }
-    catch (std::exception &e) {
+    } catch (std::exception &e) {
         std::cerr << "Exception: " << e.what() << "\n";
     }
     return 0;
@@ -91,48 +95,72 @@ net::awaitable<std::tuple<State, std::unique_ptr<tcp::socket>>> onRequest(const 
                                                                           const tcp::endpoint &serverEndpoint,
                                                                           Buffer &data,
                                                                           std::size_t &length) {
-    if (data[1] != CmdType::Connect) {
+    if (data[0] != SOCKS_VER) {
         co_return std::make_tuple(State::EndOfSession, nullptr);
     }
+
     constexpr std::size_t REPLY_LENGTH = 10;
+    std::optional<tcp::endpoint> targetEndpoint;
+    auto replyCode = ReplyCode::Succeeded;
 
-    tcp::endpoint targetEndpoint;
-
-    switch (data[3]) {
-        case AddressType::IpV4: {
-            auto addr = net::ip::address_v4({data[4],
-                                             data[5],
-                                             data[6],
-                                             data[7]});
-            net::ip::port_type targetPort = 0;
-            std::memcpy(&targetPort, &data[8], 2);
-            targetPort = ntohs(targetPort);
-            targetEndpoint = tcp::endpoint(addr, targetPort);
+    const auto addressType = data[3];
+    if (addressType == AddressType::IpV4) {
+        net::ip::port_type targetPort = 0;
+        std::memcpy(&targetPort, &data[8], sizeof(targetPort));
+        targetEndpoint = tcp::endpoint(net::ip::address_v4({data[4],
+                                                            data[5],
+                                                            data[6],
+                                                            data[7]}), ntohs(targetPort));
+    } else if (addressType == AddressType::DomainName) {
+        const std::size_t hostNameLength = data[4];
+        tcp::resolver resolver(executor);
+        net::ip::port_type targetPort = 0;
+        std::memcpy(&targetPort, &data[5] + hostNameLength, sizeof(targetPort));
+        const std::string_view hostName(reinterpret_cast<char *>(&data[5]), hostNameLength);
+        const auto [error, endpoints] = co_await resolver.async_resolve(
+                hostName,
+                std::to_string(ntohs(targetPort)),
+                net::as_tuple(net::use_awaitable));
+        if (error) {
+            std::cerr << hostName << "-" << error.message() << std::endl;
+            replyCode = ReplyCode::HostUnreachable;
+        } else if (!endpoints.empty()) {
+            targetEndpoint = *endpoints.begin();
         }
-            break;
-        case AddressType::DomainName: {
-            const std::size_t hostNameLength = data[4];
-            tcp::resolver resolver(executor);
-            net::ip::port_type targetPort = 0;
-            std::memcpy(&targetPort, &data[5] + hostNameLength, 2);
-            targetPort = ntohs(targetPort);
-            const auto endpoints = co_await resolver.async_resolve(
-                    std::string_view(reinterpret_cast<char *>(&data[5]), hostNameLength),
-                    std::to_string(targetPort),
-                    net::use_awaitable);
-            if (!endpoints.empty()) {
-                targetEndpoint = *endpoints.begin();
-            }
-        }
-            break;
-        default:
-            co_return std::make_tuple(State::EndOfSession, nullptr);
+    } else {
+        replyCode = ReplyCode::AddressTypeNotSupported;
     }
 
-    auto targetSocket = std::make_unique<tcp::socket>(executor);
-    co_await targetSocket->async_connect(targetEndpoint, net::use_awaitable);
+    std::unique_ptr<tcp::socket> targetSocket = nullptr;
+
+    if (targetEndpoint) {
+        const auto cmdType = data[1];
+        if (cmdType == CmdType::Connect) {
+            targetSocket = std::make_unique<tcp::socket>(executor);
+            const auto [error] = co_await targetSocket->async_connect(*targetEndpoint,
+                                                                      net::as_tuple(net::use_awaitable));
+            if (error) {
+                switch (error.value()) {
+                    case net::error::network_unreachable:
+                        replyCode = ReplyCode::NetworkUnreachable;
+                        break;
+                    case net::error::connection_refused:
+                        replyCode = ReplyCode::ConnectionRefused;
+                        break;
+                    default:
+                        break;
+                }
+                std::cerr << *targetEndpoint << "-" << error.message() << std::endl;
+            }
+        } else {
+            replyCode = ReplyCode::CommandNotSupported;
+        }
+    } else {
+        co_return std::make_tuple(State::EndOfSession, nullptr);
+    }
+
     data[0] = SOCKS_VER;
-    data[1] = ReplyCode::Succeeded;
+    data[1] = replyCode;
     data[2] = RESERVED_FIELD;
     data[3] = AddressType::IpV4;
 
@@ -142,9 +170,7 @@ net::awaitable<std::tuple<State, std::unique_ptr<tcp::socket>>> onRequest(const 
 
     const auto serverPort = htons(serverEndpoint.port());
     static_assert(sizeof(serverPort) == 2);
-    std::array<char, sizeof(serverPort)> serverPortBytes = {};
-    std::memcpy(serverPortBytes.data(), &serverPort, serverPortBytes.size());
-    std::copy(std::begin(serverPortBytes), std::end(serverPortBytes), &data[8]);
+    std::memcpy(&data[8], &serverPort, sizeof(serverPort));
 
     length = REPLY_LENGTH;
     co_return std::make_tuple(State::Transfer, std::move(targetSocket));
