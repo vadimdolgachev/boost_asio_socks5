@@ -12,3 +12,7 @@ cmake -DCMAKE_TOOLCHAIN_FILE=${VCPKG_HOME}/scripts/buildsystems/vcpkg.cmake -S. 
 
 ## Rfc
 https://www.rfc-editor.org/rfc/rfc1928
+
+https://www.rfc-editor.org/rfc/rfc1929
+
+https://www.rfc-editor.org/rfc/rfc1961

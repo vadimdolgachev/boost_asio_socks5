@@ -6,11 +6,18 @@
 #include <boost/system/detail/error_code.hpp>
 #include <boost/asio.hpp>
 #include <boost/asio/experimental/awaitable_operators.hpp>
+#include <boost/program_options/options_description.hpp>
+#include <boost/program_options/variables_map.hpp>
+#include <boost/program_options/parsers.hpp>
+
+#include <netinet/in.h>
 
 #include <exception>
 #include <iostream>
-#include <netinet/in.h>
 #include <string_view>
+#include <set>
+
+namespace po = boost::program_options;
 
 namespace net = boost::asio;
 
@@ -20,9 +27,27 @@ using Buffer = std::array<std::uint8_t, 4 * 1024>;
 
 constexpr std::uint8_t SOCKS_VER = 5;
 constexpr std::uint8_t RESERVED_FIELD = 0;
+constexpr std::uint8_t AUTH_METHOD_VERSION = 1;
+
+template<typename EnumType, EnumType... EnumMembers>
+struct EnumCheck {
+    template<typename ValueType>
+    requires std::same_as<ValueType, std::underlying_type_t<EnumType>>
+    static constexpr bool isValue(const ValueType) { return false; }
+};
+
+template<typename EnumType, EnumType EnumMem, EnumType... NextEnumMem>
+struct EnumCheck<EnumType, EnumMem, NextEnumMem...> : private EnumCheck<EnumType, NextEnumMem...> {
+    template<typename ValueType>
+    requires std::same_as<ValueType, std::underlying_type_t<EnumType>>
+    static constexpr bool isValue(const ValueType value) {
+        return value == static_cast<ValueType>(EnumMem) || EnumCheck<EnumType, NextEnumMem...>::isValue(value);
+    }
+};
 
 enum class State {
     Greeting,
+    UserPassRequest,
     Request,
     Transfer,
     EndOfSession
@@ -30,7 +55,17 @@ enum class State {
 
 enum AuthMethod : std::uint8_t {
     NoAuthRequired = 0,
-    UserNamePassword = 2
+    GSSAPI = 1,
+    UsernamePassword = 2
+};
+using AuthMethodCheck = EnumCheck<AuthMethod,
+        AuthMethod::UsernamePassword,
+        AuthMethod::NoAuthRequired,
+        AuthMethod::GSSAPI>;
+
+enum AuthStatusReply {
+    Successful = 0,
+    Failure = 1
 };
 
 enum CmdType : std::uint8_t {
@@ -54,14 +89,31 @@ enum ReplyCode : std::uint8_t {
     AddressTypeNotSupported = 8
 };
 
-net::awaitable<void> listen(tcp::acceptor &acceptor);
+net::awaitable<void> listen(tcp::acceptor &acceptor,
+                            const std::string &username,
+                            const std::string &password);
 
-int main() {
+int main(int argc, char *argv[]) {
+    po::options_description desc("socks5 proxy");
+    desc.add_options()
+            ("help", "produce help message")
+            ("port", po::value<std::uint16_t>()->default_value(1080), "port")
+            ("username", po::value<std::string>()->default_value(""), "username")
+            ("password", po::value<std::string>()->default_value(""), "password");
+    po::variables_map vm;
+    po::store(po::parse_command_line(argc, argv, desc), vm);
+    po::notify(vm);
+    if (vm.count("help")) {
+        std::cout << desc << "\n";
+        return 1;
+    }
     try {
         net::io_context ioContext;
 
-        tcp::acceptor acceptor(ioContext, tcp::endpoint(tcp::v4(), 10800));
-        net::co_spawn(ioContext, listen(acceptor), net::detached);
+        tcp::acceptor acceptor(ioContext, tcp::endpoint(tcp::v4(), vm["port"].as<std::uint16_t>()));
+        net::co_spawn(ioContext, listen(acceptor,
+                                        vm["username"].as<std::string>(),
+                                        vm["password"].as<std::string>()), net::detached);
         ioContext.run();
     } catch (std::exception &e) {
         std::cerr << "Exception: " << e.what() << "\n";
@@ -81,14 +133,65 @@ net::awaitable<void> transfer(tcp::socket &from, tcp::socket &to) {
     }
 }
 
-State onGreeting(Buffer &data, std::size_t &length) {
-    if (data[0] != SOCKS_VER) {
-        return State::EndOfSession;
+std::tuple<State, size_t> onGreeting(Buffer &data, const std::size_t length, const bool isEmptyUsername) {
+    constexpr size_t minLength = 3;
+    size_t cursor = 0;
+    if (length < minLength || data[cursor] != SOCKS_VER) {
+        return std::make_tuple(State::EndOfSession, 0);
     }
+    cursor += 1;
+    const size_t authMethodLength = data[cursor];
+    if (cursor + authMethodLength > length) {
+        return std::make_tuple(State::EndOfSession, 0);
+    }
+
+    std::set<AuthMethod> authMethods;
+    for (int i = 0; i < authMethodLength; ++i) {
+        cursor += 1;
+        if (const auto value = data[cursor]; AuthMethodCheck::isValue(value)) {
+            authMethods.insert(static_cast<AuthMethod>(value));
+        }
+    }
+
+    const auto selectedAuthMethod = authMethods.contains(AuthMethod::UsernamePassword) || !isEmptyUsername
+                                    ? AuthMethod::UsernamePassword : AuthMethod::NoAuthRequired;
+    constexpr size_t responseLength = 2;
     data[0] = SOCKS_VER;
-    data[1] = AuthMethod::NoAuthRequired;
-    length = 2;
-    return State::Request;
+    data[1] = selectedAuthMethod;
+    return std::make_tuple(selectedAuthMethod == AuthMethod::UsernamePassword
+                           ? State::UserPassRequest : State::Request, responseLength);
+}
+
+std::tuple<State, size_t> onUserPassRequest(Buffer &data,
+                                            const size_t length,
+                                            const std::string &username,
+                                            const std::string &password) {
+    size_t cursor = 0;
+    if (data[cursor] != AUTH_METHOD_VERSION) {
+        return std::make_tuple(State::EndOfSession, 0);
+    }
+    cursor += 1;
+
+    const auto clientUsernameLength = data[cursor];
+    cursor += 1;
+    if (cursor + clientUsernameLength > length) {
+        return std::make_tuple(State::EndOfSession, 0);
+    }
+    const std::string_view clientUsername(reinterpret_cast<char *>(&data[cursor]), clientUsernameLength);
+
+    cursor += clientUsernameLength;
+    const auto clientPasswordLength = data[cursor];
+    cursor += 1;
+    if (cursor + clientPasswordLength > length) {
+        return std::make_tuple(State::EndOfSession, 0);
+    }
+    const std::string_view clientPassword(reinterpret_cast<char *>(&data[cursor]), clientPasswordLength);
+
+    constexpr size_t responseLength = 2;
+    data[0] = AUTH_METHOD_VERSION;
+    data[1] = (username == clientUsername && (password.empty() || password == clientPassword))
+              ? AuthStatusReply::Successful : AuthStatusReply::Failure;
+    return std::make_tuple(State::Request, responseLength);
 }
 
 net::awaitable<std::tuple<State, std::unique_ptr<tcp::socket>>> onRequest(const tcp::socket::executor_type &executor,
@@ -185,7 +288,9 @@ onTransfer(tcp::socket &client, tcp::socket &targetSocket, const Buffer &data, c
     co_return State::EndOfSession;
 }
 
-net::awaitable<void> startSession(tcp::socket client) {
+net::awaitable<void> startSession(tcp::socket client,
+                                  const std::string &username,
+                                  const std::string &password) {
     State state = State::Greeting;
     Buffer data = {};
     std::unique_ptr<tcp::socket> targetSocket;
@@ -202,11 +307,14 @@ net::awaitable<void> startSession(tcp::socket client) {
 
             switch (state) {
                 case State::Greeting:
-                    state = onGreeting(data, length);
+                    std::tie(state, length) = onGreeting(data, length, username.empty());
                     break;
                 case State::Request:
                     std::tie(state, targetSocket)
                             = co_await onRequest(client.get_executor(), client.local_endpoint(), data, length);
+                    break;
+                case State::UserPassRequest:
+                    std::tie(state, length) = onUserPassRequest(data, length, username, password);
                     break;
                 case State::Transfer:
                     state = targetSocket ? co_await onTransfer(client, *targetSocket, data, length)
@@ -227,14 +335,16 @@ net::awaitable<void> startSession(tcp::socket client) {
     }
 }
 
-net::awaitable<void> listen(tcp::acceptor &acceptor) {
+net::awaitable<void> listen(tcp::acceptor &acceptor,
+                            const std::string &username,
+                            const std::string &password) {
     using namespace std::chrono_literals;
 
     for (;;) {
         auto [error, client] = co_await acceptor.async_accept(net::as_tuple(net::use_awaitable));
         if (!error) {
             const auto executor = client.get_executor();
-            net::co_spawn(executor, startSession(std::move(client)), net::detached);
+            net::co_spawn(executor, startSession(std::move(client), username, password), net::detached);
         } else {
             std::cerr << "Accept failed: " << error.message() << "\n";
             net::steady_timer timer(co_await net::this_coro::executor);
