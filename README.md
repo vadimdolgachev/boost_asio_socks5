@@ -10,6 +10,8 @@ cmake -DCMAKE_TOOLCHAIN_FILE=${VCPKG_HOME}/scripts/buildsystems/vcpkg.cmake -S. 
 
 `curl --socks5-hostname 127.0.0.1:10800 https://ident.me`
 
+`curl --socks5 user:pass@127.0.0.1:10800 http://ident.me`
+
 ## Rfc
 https://www.rfc-editor.org/rfc/rfc1928
 
