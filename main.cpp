@@ -29,17 +29,20 @@ constexpr std::uint8_t SOCKS_VER = 5;
 constexpr std::uint8_t RESERVED_FIELD = 0;
 constexpr std::uint8_t AUTH_METHOD_VERSION = 1;
 
+template<typename ValType, typename EnumType>
+concept isEnumType = std::same_as<ValType, std::underlying_type_t<EnumType>>;
+
 template<typename EnumType, EnumType... EnumMembers>
 struct EnumCheck {
     template<typename ValueType>
-    requires std::same_as<ValueType, std::underlying_type_t<EnumType>>
+    requires isEnumType<ValueType, EnumType>
     static constexpr bool isValue(const ValueType) { return false; }
 };
 
 template<typename EnumType, EnumType EnumMem, EnumType... NextEnumMem>
 struct EnumCheck<EnumType, EnumMem, NextEnumMem...> : private EnumCheck<EnumType, NextEnumMem...> {
     template<typename ValueType>
-    requires std::same_as<ValueType, std::underlying_type_t<EnumType>>
+    requires isEnumType<ValueType, EnumType>
     static constexpr bool isValue(const ValueType value) {
         return value == static_cast<ValueType>(EnumMem) || EnumCheck<EnumType, NextEnumMem...>::isValue(value);
     }
@@ -63,7 +66,7 @@ using AuthMethodCheck = EnumCheck<AuthMethod,
         AuthMethod::NoAuthRequired,
         AuthMethod::GSSAPI>;
 
-enum AuthStatusReply {
+enum AuthStatusReply : std::uint8_t {
     Successful = 0,
     Failure = 1
 };
