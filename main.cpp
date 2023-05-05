@@ -15,7 +15,7 @@
 #include <exception>
 #include <iostream>
 #include <string_view>
-#include <set>
+#include <unordered_set>
 
 namespace po = boost::program_options;
 
@@ -108,7 +108,7 @@ int main(int argc, char *argv[]) {
     po::notify(vm);
     if (vm.count("help")) {
         std::cout << desc << "\n";
-        return 1;
+        return 0;
     }
     try {
         net::io_context ioContext;
@@ -148,7 +148,7 @@ std::tuple<State, size_t> onGreeting(Buffer &data, const std::size_t length, con
         return std::make_tuple(State::EndOfSession, 0);
     }
 
-    std::set<AuthMethod> authMethods;
+    std::unordered_set<AuthMethod> authMethods;
     for (int i = 0; i < authMethodLength; ++i) {
         cursor += 1;
         if (const auto value = data[cursor]; AuthMethodCheck::isValue(value)) {
