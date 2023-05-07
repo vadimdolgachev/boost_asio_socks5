@@ -5,5 +5,13 @@ find_package(Boost REQUIRED COMPONENTS system program_options)
 
 set(CMAKE_CXX_STANDARD 20)
 
+set(COMPILE_FLAGS
+            -Wall
+            -Wpedantic
+            -Wextra
+            -Werror=unused-result
+            -Werror=return-type
+            -Wfloat-equal)
+
 add_executable(boost_asio_socks5 main.cpp)
 target_link_libraries(boost_asio_socks5 PRIVATE Boost::system Boost::program_options)

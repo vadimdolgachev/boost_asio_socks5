@@ -36,7 +36,7 @@ template<typename EnumType, EnumType... EnumMembers>
 struct EnumCheck {
     template<typename ValueType>
     requires isEnumType<ValueType, EnumType>
-    static constexpr bool isValue(const ValueType) { return false; }
+    static constexpr bool isValue(const ValueType /*value*/) { return false; }
 };
 
 template<typename EnumType, EnumType EnumMem, EnumType... NextEnumMem>
@@ -103,20 +103,20 @@ int main(int argc, char *argv[]) {
             ("port", po::value<std::uint16_t>()->default_value(1080), "port")
             ("username", po::value<std::string>()->default_value(""), "username")
             ("password", po::value<std::string>()->default_value(""), "password");
-    po::variables_map vm;
-    po::store(po::parse_command_line(argc, argv, desc), vm);
-    po::notify(vm);
-    if (vm.count("help")) {
+    po::variables_map optionsVarsMap;
+    po::store(po::parse_command_line(argc, argv, desc), optionsVarsMap);
+    po::notify(optionsVarsMap);
+    if (optionsVarsMap.count("help") > 0) {
         std::cout << desc << "\n";
         return 0;
     }
     try {
         net::io_context ioContext;
 
-        tcp::acceptor acceptor(ioContext, tcp::endpoint(tcp::v4(), vm["port"].as<std::uint16_t>()));
+        tcp::acceptor acceptor(ioContext, tcp::endpoint(tcp::v4(), optionsVarsMap["port"].as<std::uint16_t>()));
         net::co_spawn(ioContext, listen(acceptor,
-                                        vm["username"].as<std::string>(),
-                                        vm["password"].as<std::string>()), net::detached);
+                                        optionsVarsMap["username"].as<std::string>(),
+                                        optionsVarsMap["password"].as<std::string>()), net::detached);
         ioContext.run();
     } catch (std::exception &e) {
         std::cerr << "Exception: " << e.what() << "\n";
@@ -127,29 +127,33 @@ int main(int argc, char *argv[]) {
 net::awaitable<void> transfer(tcp::socket &from, tcp::socket &to) {
     Buffer data = {};
     for (;;) {
-        const auto [error, length] = co_await from.async_read_some(net::buffer(data),
-                                                                   net::as_tuple(net::use_awaitable));
-        if (error == net::error::eof) {
+        const auto [readError, readLength] = co_await from.async_read_some(net::buffer(data),
+                                                                           net::as_tuple(net::use_awaitable));
+        if (readError == net::error::eof) {
             break;
         }
-        co_await net::async_write(to, net::buffer(data, length), net::use_awaitable);
+        const auto [writeError, writeLength] = co_await net::async_write(to, net::buffer(data, readLength),
+                                                               net::as_tuple(net::use_awaitable));
+        if (writeError == net::error::eof) {
+            break;
+        }
     }
 }
 
-std::tuple<State, size_t> onGreeting(Buffer &data, const std::size_t length, const bool isEmptyUsername) {
-    constexpr size_t minLength = 3;
-    size_t cursor = 0;
+std::tuple<State, std::size_t> onGreeting(Buffer &data, const std::size_t length, const bool isEmptyUsername) {
+    constexpr std::size_t minLength = 3;
+    std::size_t cursor = 0;
     if (length < minLength || data[cursor] != SOCKS_VER) {
         return std::make_tuple(State::EndOfSession, 0);
     }
     cursor += 1;
-    const size_t authMethodLength = data[cursor];
+    const std::size_t authMethodLength = data[cursor];
     if (cursor + authMethodLength > length) {
         return std::make_tuple(State::EndOfSession, 0);
     }
 
     std::unordered_set<AuthMethod> authMethods;
-    for (int i = 0; i < authMethodLength; ++i) {
+    for (std::size_t i = 0; i < authMethodLength; ++i) {
         cursor += 1;
         if (const auto value = data[cursor]; AuthMethodCheck::isValue(value)) {
             authMethods.insert(static_cast<AuthMethod>(value));
@@ -158,18 +162,18 @@ std::tuple<State, size_t> onGreeting(Buffer &data, const std::size_t length, con
 
     const auto selectedAuthMethod = authMethods.contains(AuthMethod::UsernamePassword) || !isEmptyUsername
                                     ? AuthMethod::UsernamePassword : AuthMethod::NoAuthRequired;
-    constexpr size_t responseLength = 2;
+    constexpr std::size_t responseLength = 2;
     data[0] = SOCKS_VER;
     data[1] = selectedAuthMethod;
     return std::make_tuple(selectedAuthMethod == AuthMethod::UsernamePassword
                            ? State::UserPassRequest : State::Request, responseLength);
 }
 
-std::tuple<State, size_t> onUserPassRequest(Buffer &data,
-                                            const size_t length,
+std::tuple<State, std::size_t> onUserPassRequest(Buffer &data,
+                                            const std::size_t length,
                                             const std::string &username,
                                             const std::string &password) {
-    size_t cursor = 0;
+    std::size_t cursor = 0;
     if (data[cursor] != AUTH_METHOD_VERSION) {
         return std::make_tuple(State::EndOfSession, 0);
     }
@@ -190,7 +194,7 @@ std::tuple<State, size_t> onUserPassRequest(Buffer &data,
     }
     const std::string_view clientPassword(reinterpret_cast<char *>(&data[cursor]), clientPasswordLength);
 
-    constexpr size_t responseLength = 2;
+    constexpr std::size_t responseLength = 2;
     data[0] = AUTH_METHOD_VERSION;
     data[1] = (username == clientUsername && (password.empty() || password == clientPassword))
               ? AuthStatusReply::Successful : AuthStatusReply::Failure;
@@ -283,7 +287,7 @@ net::awaitable<std::tuple<State, std::unique_ptr<tcp::socket>>> onRequest(const 
 }
 
 net::awaitable<State>
-onTransfer(tcp::socket &client, tcp::socket &targetSocket, const Buffer &data, const size_t length) {
+onTransfer(tcp::socket &client, tcp::socket &targetSocket, const Buffer &data, const std::size_t length) {
     using namespace net::experimental::awaitable_operators;
 
     co_await net::async_write(targetSocket, net::buffer(data, length), net::use_awaitable);

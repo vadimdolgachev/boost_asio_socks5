@@ -1,0 +1,10 @@
+Checks: google-*,
+  bugprone-*,
+  clang-analyzer-*,
+  misc-*,
+  performance-*,
+  portability-*,
+  readability-*
+
+CheckOptions:
+  - { key: readability-identifier-length.MinimumParameterNameLength, value: 2 }
