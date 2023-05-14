@@ -18,7 +18,6 @@
 #include <exception>
 #include <iostream>
 #include <string_view>
-#include <type_traits>
 #include <unordered_set>
 
 namespace po = boost::program_options;
@@ -108,23 +107,23 @@ net::awaitable<void> listenSslSocket(tcp::acceptor &acceptor,
                                      const std::string &dhKeyPath);
 
 int main(int argc, char *argv[]) {
-            po::options_description desc("socks5 proxy");
-            desc.add_options()
-                    ("help", "produce help message")
-                    ("port", po::value<std::uint16_t>()->default_value(1080), "port")
-                    ("ssl_port", po::value<std::uint16_t>()->default_value(0), "ssl_port")
-                    ("cert_path", po::value<std::string>()->default_value(""), "cert_path")
-                    ("private_key_path", po::value<std::string>()->default_value(""), "private_key_path")
-                    ("dh_key_path", po::value<std::string>()->default_value(""), "dh_key_path")
-                    ("username", po::value<std::string>()->default_value(""), "username")
-                    ("password", po::value<std::string>()->default_value(""), "password");
-            po::variables_map optionsVarsMap;
-            po::store(po::parse_command_line(argc, argv, desc), optionsVarsMap);
-            po::notify(optionsVarsMap);
-            if (optionsVarsMap.count("help") > 0) {
-                std::cout << desc << "\n";
-                return 0;
-            }
+    po::options_description desc("socks5 proxy");
+    desc.add_options()
+            ("help", "produce help message")
+            ("port", po::value<std::uint16_t>()->default_value(1080), "port")
+            ("ssl_port", po::value<std::uint16_t>()->default_value(0), "ssl_port")
+            ("cert_path", po::value<std::string>()->default_value(""), "cert_path")
+            ("private_key_path", po::value<std::string>()->default_value(""), "private_key_path")
+            ("dh_key_path", po::value<std::string>()->default_value(""), "dh_key_path")
+            ("username", po::value<std::string>()->default_value(""), "username")
+            ("password", po::value<std::string>()->default_value(""), "password");
+    po::variables_map optionsVarsMap;
+    po::store(po::parse_command_line(argc, argv, desc), optionsVarsMap);
+    po::notify(optionsVarsMap);
+    if (optionsVarsMap.count("help") > 0) {
+        std::cout << desc << "\n";
+        return 0;
+    }
     try {
         net::io_context ioContext;
         std::unique_ptr<tcp::acceptor> acceptor;
@@ -334,13 +333,13 @@ net::awaitable<State> onTransfer(SocketType &clientSocket,
 }
 
 template<typename SocketType>
-tcp::endpoint getLocalEndpoint(const SocketType &socket) {
-    if constexpr (std::is_same<SocketType, net::ssl::stream<tcp::socket>>::value) {
-        return socket.lowest_layer().local_endpoint();
-    } else if (std::is_same<SocketType, tcp::socket>::value) {
-        return socket.local_endpoint();
+requires (std::same_as<SocketType, net::ssl::stream<tcp::socket>> || std::same_as<SocketType, tcp::socket>)
+const auto &toTcpSocket(const SocketType &socket) {
+    if constexpr (std::same_as<SocketType, net::ssl::stream<tcp::socket>>) {
+        return socket.lowest_layer();
+    } else if (std::same_as<SocketType, tcp::socket>) {
+        return socket;
     }
-    static_assert("Unsupported socket type");
 }
 
 template<typename SocketType>
@@ -367,7 +366,8 @@ net::awaitable<void> startSession(SocketType client,
                     break;
                 case State::Request:
                     std::tie(state, targetSocket)
-                            = co_await onRequest(client.get_executor(), getLocalEndpoint(client), data, length);
+                            = co_await onRequest(client.get_executor(), toTcpSocket(client).local_endpoint(), data,
+                                                 length);
                     break;
                 case State::UserPassRequest:
                     std::tie(state, length) = onUserPassRequest(data, length, username, password);
