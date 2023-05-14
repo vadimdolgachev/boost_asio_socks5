@@ -14,6 +14,8 @@ set(COMPILE_FLAGS
             -Werror=return-type
             -Wfloat-equal)
 
+add_subdirectory(socks5_ssl_tunnel)
+
 add_executable(boost_asio_socks5 main.cpp)
 target_compile_options(boost_asio_socks5 PRIVATE ${COMPILE_FLAGS})
 target_link_libraries(boost_asio_socks5 PRIVATE
