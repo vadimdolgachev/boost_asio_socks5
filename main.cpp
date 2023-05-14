@@ -1,6 +1,7 @@
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/error.hpp>
+#include <boost/asio/ssl/stream.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/write.hpp>
 #include <boost/system/detail/error_code.hpp>
@@ -9,12 +10,15 @@
 #include <boost/program_options/options_description.hpp>
 #include <boost/program_options/variables_map.hpp>
 #include <boost/program_options/parsers.hpp>
+#include <boost/asio/ssl.hpp>
 
 #include <netinet/in.h>
 
+#include <memory>
 #include <exception>
 #include <iostream>
 #include <string_view>
+#include <type_traits>
 #include <unordered_set>
 
 namespace po = boost::program_options;
@@ -96,27 +100,56 @@ net::awaitable<void> listen(tcp::acceptor &acceptor,
                             const std::string &username,
                             const std::string &password);
 
+net::awaitable<void> listenSslSocket(tcp::acceptor &acceptor,
+                                     const std::string &username,
+                                     const std::string &password,
+                                     const std::string &certPath,
+                                     const std::string &privateKeyPath,
+                                     const std::string &dhKeyPath);
+
 int main(int argc, char *argv[]) {
-    po::options_description desc("socks5 proxy");
-    desc.add_options()
-            ("help", "produce help message")
-            ("port", po::value<std::uint16_t>()->default_value(1080), "port")
-            ("username", po::value<std::string>()->default_value(""), "username")
-            ("password", po::value<std::string>()->default_value(""), "password");
-    po::variables_map optionsVarsMap;
-    po::store(po::parse_command_line(argc, argv, desc), optionsVarsMap);
-    po::notify(optionsVarsMap);
-    if (optionsVarsMap.count("help") > 0) {
-        std::cout << desc << "\n";
-        return 0;
-    }
+            po::options_description desc("socks5 proxy");
+            desc.add_options()
+                    ("help", "produce help message")
+                    ("port", po::value<std::uint16_t>()->default_value(1080), "port")
+                    ("ssl_port", po::value<std::uint16_t>()->default_value(0), "ssl_port")
+                    ("cert_path", po::value<std::string>()->default_value(""), "cert_path")
+                    ("private_key_path", po::value<std::string>()->default_value(""), "private_key_path")
+                    ("dh_key_path", po::value<std::string>()->default_value(""), "dh_key_path")
+                    ("username", po::value<std::string>()->default_value(""), "username")
+                    ("password", po::value<std::string>()->default_value(""), "password");
+            po::variables_map optionsVarsMap;
+            po::store(po::parse_command_line(argc, argv, desc), optionsVarsMap);
+            po::notify(optionsVarsMap);
+            if (optionsVarsMap.count("help") > 0) {
+                std::cout << desc << "\n";
+                return 0;
+            }
     try {
         net::io_context ioContext;
+        std::unique_ptr<tcp::acceptor> acceptor;
+        std::unique_ptr<tcp::acceptor> sslAcceptor;
 
-        tcp::acceptor acceptor(ioContext, tcp::endpoint(tcp::v4(), optionsVarsMap["port"].as<std::uint16_t>()));
-        net::co_spawn(ioContext, listen(acceptor,
-                                        optionsVarsMap["username"].as<std::string>(),
-                                        optionsVarsMap["password"].as<std::string>()), net::detached);
+        if (const auto port = optionsVarsMap["port"].as<std::uint16_t>(); port != 0) {
+            acceptor = std::make_unique<tcp::acceptor>(ioContext, tcp::endpoint(tcp::v4(), port));
+            net::co_spawn(ioContext, listen(*acceptor,
+                                            optionsVarsMap["username"].as<std::string>(),
+                                            optionsVarsMap["password"].as<std::string>()), net::detached);
+
+        }
+        if (const auto sslPort = optionsVarsMap["ssl_port"].as<std::uint16_t>(); sslPort != 0) {
+            sslAcceptor = std::make_unique<tcp::acceptor>(ioContext,
+                                                          tcp::endpoint(tcp::v4(), sslPort));
+            net::co_spawn(ioContext, listenSslSocket(*sslAcceptor,
+                                                     optionsVarsMap["username"].as<std::string>(),
+                                                     optionsVarsMap["password"].as<std::string>(),
+                                                     optionsVarsMap["cert_path"].as<std::string>(),
+                                                     optionsVarsMap["private_key_path"].as<std::string>(),
+                                                     optionsVarsMap["dh_key_path"].as<std::string>()),
+                          net::detached);
+
+        }
+        std::cout << "Server started" << std::endl;
         ioContext.run();
     } catch (std::exception &e) {
         std::cerr << "Exception: " << e.what() << "\n";
@@ -124,16 +157,18 @@ int main(int argc, char *argv[]) {
     return 0;
 }
 
-net::awaitable<void> transfer(tcp::socket &from, tcp::socket &to) {
+template<typename ReadableSocketType, typename WritableSocketType>
+net::awaitable<void> transfer(ReadableSocketType &readableSocket, WritableSocketType &writableSocket) {
     Buffer data = {};
     for (;;) {
-        const auto [readError, readLength] = co_await from.async_read_some(net::buffer(data),
-                                                                           net::as_tuple(net::use_awaitable));
+        const auto [readError, readLength] = co_await readableSocket.async_read_some(net::buffer(data),
+                                                                                     net::as_tuple(net::use_awaitable));
         if (readError == net::error::eof) {
             break;
         }
-        const auto [writeError, writeLength] = co_await net::async_write(to, net::buffer(data, readLength),
-                                                               net::as_tuple(net::use_awaitable));
+        const auto [writeError, writeLength] = co_await net::async_write(writableSocket,
+                                                                         net::buffer(data, readLength),
+                                                                         net::as_tuple(net::use_awaitable));
         if (writeError == net::error::eof) {
             break;
         }
@@ -170,9 +205,9 @@ std::tuple<State, std::size_t> onGreeting(Buffer &data, const std::size_t length
 }
 
 std::tuple<State, std::size_t> onUserPassRequest(Buffer &data,
-                                            const std::size_t length,
-                                            const std::string &username,
-                                            const std::string &password) {
+                                                 const std::size_t length,
+                                                 const std::string &username,
+                                                 const std::string &password) {
     std::size_t cursor = 0;
     if (data[cursor] != AUTH_METHOD_VERSION) {
         return std::make_tuple(State::EndOfSession, 0);
@@ -286,16 +321,30 @@ net::awaitable<std::tuple<State, std::unique_ptr<tcp::socket>>> onRequest(const 
     co_return std::make_tuple(State::Transfer, std::move(targetSocket));
 }
 
-net::awaitable<State>
-onTransfer(tcp::socket &client, tcp::socket &targetSocket, const Buffer &data, const std::size_t length) {
+template<typename SocketType>
+net::awaitable<State> onTransfer(SocketType &clientSocket,
+                                 tcp::socket &targetSocket,
+                                 const Buffer &data,
+                                 const std::size_t length) {
     using namespace net::experimental::awaitable_operators;
 
     co_await net::async_write(targetSocket, net::buffer(data, length), net::use_awaitable);
-    co_await (transfer(client, targetSocket) && transfer(targetSocket, client));
+    co_await (transfer(clientSocket, targetSocket) && transfer(targetSocket, clientSocket));
     co_return State::EndOfSession;
 }
 
-net::awaitable<void> startSession(tcp::socket client,
+template<typename SocketType>
+tcp::endpoint getLocalEndpoint(const SocketType &socket) {
+    if constexpr (std::is_same<SocketType, net::ssl::stream<tcp::socket>>::value) {
+        return socket.lowest_layer().local_endpoint();
+    } else if (std::is_same<SocketType, tcp::socket>::value) {
+        return socket.local_endpoint();
+    }
+    static_assert("Unsupported socket type");
+}
+
+template<typename SocketType>
+net::awaitable<void> startSession(SocketType client,
                                   const std::string &username,
                                   const std::string &password) {
     State state = State::Greeting;
@@ -318,7 +367,7 @@ net::awaitable<void> startSession(tcp::socket client,
                     break;
                 case State::Request:
                     std::tie(state, targetSocket)
-                            = co_await onRequest(client.get_executor(), client.local_endpoint(), data, length);
+                            = co_await onRequest(client.get_executor(), getLocalEndpoint(client), data, length);
                     break;
                 case State::UserPassRequest:
                     std::tie(state, length) = onUserPassRequest(data, length, username, password);
@@ -342,16 +391,59 @@ net::awaitable<void> startSession(tcp::socket client,
     }
 }
 
+net::awaitable<void> listenSslSocket(tcp::acceptor &acceptor,
+                                     const std::string &username,
+                                     const std::string &password,
+                                     const std::string &certPath,
+                                     const std::string &privateKeyPath,
+                                     const std::string &dhKeyPath) {
+    using namespace std::chrono_literals;
+
+    for (;;) {
+        auto [error, clientSocket] = co_await acceptor.async_accept(net::as_tuple(net::use_awaitable));
+        if (!error) {
+            const auto executor = clientSocket.get_executor();
+            net::ssl::context context(net::ssl::context::tlsv13_server);
+            context.set_options(net::ssl::context::default_workarounds |
+                                net::ssl::context::no_sslv2 | net::ssl::context::no_sslv3 |
+                                net::ssl::context::no_tlsv1_1 | net::ssl::context::no_tlsv1_2 |
+                                net::ssl::context::single_dh_use);
+            context.use_certificate_chain_file(certPath);
+            context.use_private_key_file(privateKeyPath, net::ssl::context::pem);
+            context.use_tmp_dh_file(dhKeyPath);
+
+            net::ssl::stream<tcp::socket> sslClientSocket(std::move(clientSocket), context);
+            const auto [handshakeError] =
+                    co_await sslClientSocket.async_handshake(net::ssl::stream_base::server,
+                                                             net::as_tuple(net::use_awaitable));
+            if (!handshakeError) {
+                net::co_spawn(executor,
+                              startSession(std::move(sslClientSocket), username, password),
+                              net::detached);
+            } else {
+                std::cerr << "Handshake error: " << handshakeError.message() << std::endl;
+            }
+        } else {
+            std::cerr << "Accept failed: " << error.message() << "\n";
+            net::steady_timer timer(co_await net::this_coro::executor);
+            timer.expires_after(100ms);
+            co_await timer.async_wait(net::use_awaitable);
+        }
+    }
+}
+
 net::awaitable<void> listen(tcp::acceptor &acceptor,
                             const std::string &username,
                             const std::string &password) {
     using namespace std::chrono_literals;
 
     for (;;) {
-        auto [error, client] = co_await acceptor.async_accept(net::as_tuple(net::use_awaitable));
+        auto [error, clientSocket] = co_await acceptor.async_accept(net::as_tuple(net::use_awaitable));
         if (!error) {
-            const auto executor = client.get_executor();
-            net::co_spawn(executor, startSession(std::move(client), username, password), net::detached);
+            const auto executor = clientSocket.get_executor();
+            net::co_spawn(executor,
+                          startSession(std::move(clientSocket), username, password),
+                          net::detached);
         } else {
             std::cerr << "Accept failed: " << error.message() << "\n";
             net::steady_timer timer(co_await net::this_coro::executor);
