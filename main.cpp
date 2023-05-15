@@ -95,16 +95,16 @@ enum ReplyCode : std::uint8_t {
     AddressTypeNotSupported = 8
 };
 
-net::awaitable<void> listen(tcp::acceptor &acceptor,
+net::awaitable<void> listen(std::unique_ptr<tcp::acceptor> acceptor,
                             const std::string &username,
                             const std::string &password);
 
-net::awaitable<void> listenSslSocket(tcp::acceptor &acceptor,
-                                     const std::string &username,
-                                     const std::string &password,
-                                     const std::string &certPath,
-                                     const std::string &privateKeyPath,
-                                     const std::string &dhKeyPath);
+net::awaitable<void> listenSsl(std::unique_ptr<tcp::acceptor> acceptor,
+                               const std::string &username,
+                               const std::string &password,
+                               const std::string &certPath,
+                               const std::string &privateKeyPath,
+                               const std::string &dhKeyPath);
 
 int main(int argc, char *argv[]) {
     po::options_description desc("socks5 proxy");
@@ -126,25 +126,22 @@ int main(int argc, char *argv[]) {
     }
     try {
         net::io_context ioContext;
-        std::unique_ptr<tcp::acceptor> acceptor;
-        std::unique_ptr<tcp::acceptor> sslAcceptor;
 
         if (const auto port = optionsVarsMap["port"].as<std::uint16_t>(); port != 0) {
-            acceptor = std::make_unique<tcp::acceptor>(ioContext, tcp::endpoint(tcp::v4(), port));
-            net::co_spawn(ioContext, listen(*acceptor,
+            net::co_spawn(ioContext, listen(std::make_unique<tcp::acceptor>(ioContext,
+                                                                            tcp::endpoint(tcp::v4(), port)),
                                             optionsVarsMap["username"].as<std::string>(),
                                             optionsVarsMap["password"].as<std::string>()), net::detached);
 
         }
         if (const auto sslPort = optionsVarsMap["ssl_port"].as<std::uint16_t>(); sslPort != 0) {
-            sslAcceptor = std::make_unique<tcp::acceptor>(ioContext,
-                                                          tcp::endpoint(tcp::v4(), sslPort));
-            net::co_spawn(ioContext, listenSslSocket(*sslAcceptor,
-                                                     optionsVarsMap["username"].as<std::string>(),
-                                                     optionsVarsMap["password"].as<std::string>(),
-                                                     optionsVarsMap["cert_path"].as<std::string>(),
-                                                     optionsVarsMap["private_key_path"].as<std::string>(),
-                                                     optionsVarsMap["dh_key_path"].as<std::string>()),
+            net::co_spawn(ioContext, listenSsl(std::make_unique<tcp::acceptor>(ioContext,
+                                                                               tcp::endpoint(tcp::v4(), sslPort)),
+                                               optionsVarsMap["username"].as<std::string>(),
+                                               optionsVarsMap["password"].as<std::string>(),
+                                               optionsVarsMap["cert_path"].as<std::string>(),
+                                               optionsVarsMap["private_key_path"].as<std::string>(),
+                                               optionsVarsMap["dh_key_path"].as<std::string>()),
                           net::detached);
 
         }
@@ -391,16 +388,16 @@ net::awaitable<void> startSession(SocketType client,
     }
 }
 
-net::awaitable<void> listenSslSocket(tcp::acceptor &acceptor,
-                                     const std::string &username,
-                                     const std::string &password,
-                                     const std::string &certPath,
-                                     const std::string &privateKeyPath,
-                                     const std::string &dhKeyPath) {
+net::awaitable<void> listenSsl(std::unique_ptr<tcp::acceptor> acceptor,
+                               const std::string &username,
+                               const std::string &password,
+                               const std::string &certPath,
+                               const std::string &privateKeyPath,
+                               const std::string &dhKeyPath) {
     using namespace std::chrono_literals;
 
     for (;;) {
-        auto [error, clientSocket] = co_await acceptor.async_accept(net::as_tuple(net::use_awaitable));
+        auto [error, clientSocket] = co_await acceptor->async_accept(net::as_tuple(net::use_awaitable));
         if (!error) {
             const auto executor = clientSocket.get_executor();
             net::ssl::context context(net::ssl::context::tlsv13_server);
@@ -432,13 +429,13 @@ net::awaitable<void> listenSslSocket(tcp::acceptor &acceptor,
     }
 }
 
-net::awaitable<void> listen(tcp::acceptor &acceptor,
+net::awaitable<void> listen(std::unique_ptr<tcp::acceptor> acceptor,
                             const std::string &username,
                             const std::string &password) {
     using namespace std::chrono_literals;
 
     for (;;) {
-        auto [error, clientSocket] = co_await acceptor.async_accept(net::as_tuple(net::use_awaitable));
+        auto [error, clientSocket] = co_await acceptor->async_accept(net::as_tuple(net::use_awaitable));
         if (!error) {
             const auto executor = clientSocket.get_executor();
             net::co_spawn(executor,
