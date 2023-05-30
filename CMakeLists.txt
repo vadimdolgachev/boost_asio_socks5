@@ -14,6 +14,11 @@ set(COMPILE_FLAGS
             -Werror=return-type
             -Wfloat-equal)
 
+add_compile_definitions(
+        $<$<CONFIG:DEBUG>:BOOST_ASIO_ENABLE_BUFFER_DEBUGGING>
+        $<$<CONFIG:DEBUG>:BOOST_ASIO_ENABLE_HANDLER_TRACKING>
+)
+
 add_subdirectory(socks5_ssl_tunnel)
 
 add_executable(boost_asio_socks5 main.cpp)

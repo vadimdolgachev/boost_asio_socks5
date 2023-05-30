@@ -77,8 +77,9 @@ net::awaitable<void> startSession(tcp::socket clientSocket,
                                   const std::string &certPath) {
     using namespace net::experimental::awaitable_operators;
     tcp::socket socks5Server(clientSocket.get_executor());
-    if (const auto [error] = co_await socks5Server.async_connect({net::ip::address_v4::from_string(socks5Addr), socks5Port},
-                                                                 net::as_tuple(net::use_awaitable)); !error) {
+    if (const auto [error] = co_await socks5Server.async_connect(
+                {net::ip::address_v4::from_string(socks5Addr), socks5Port},
+                net::as_tuple(net::use_awaitable)); !error) {
         net::ssl::context context(net::ssl::context::tlsv13_client);
         context.set_options(net::ssl::context::default_workarounds |
                             net::ssl::context::no_sslv2 | net::ssl::context::no_sslv3 |
@@ -92,14 +93,14 @@ net::awaitable<void> startSession(tcp::socket clientSocket,
         if (!handshakeError) {
             co_await (transfer(clientSocket, sslSocket) || transfer(sslSocket, clientSocket));
         } else {
-            std::cerr << "Handshake error: " << handshakeError.message() << std::endl;
+            std::cerr << "Handshake error: " << handshakeError.message() << '\n';
         }
         const auto [errorShutdown] = co_await sslSocket.async_shutdown(net::as_tuple(net::use_awaitable));
         if (errorShutdown) {
-            std::cerr << "Shutdown error: " << errorShutdown.message() << std::endl;
+            std::cerr << "Shutdown error: " << errorShutdown.message() << '\n';
         }
     } else {
-        std::cerr << "Connection error: " << error.message() << std::endl;
+        std::cerr << "Connection error: " << error.message() << '\n';
     }
 }
 
@@ -118,7 +119,7 @@ net::awaitable<void> listen(tcp::acceptor &acceptor,
                                                  socks5Port,
                                                  certPath), net::detached);
         } else {
-            std::cerr << "Accept failed: " << error.message() << "\n";
+            std::cerr << "Accept failed: " << error.message() << '\n';
             net::steady_timer timer(co_await net::this_coro::executor);
             timer.expires_after(100ms);
             co_await timer.async_wait(net::use_awaitable);

@@ -110,7 +110,7 @@ int main(int argc, char *argv[]) {
     po::options_description desc("socks5 proxy");
     desc.add_options()
             ("help", "produce help message")
-            ("port", po::value<std::uint16_t>()->default_value(1080), "port")
+            ("port", po::value<std::uint16_t>()->default_value(0), "port")
             ("ssl_port", po::value<std::uint16_t>()->default_value(0), "ssl_port")
             ("cert_path", po::value<std::string>()->default_value(""), "cert_path")
             ("private_key_path", po::value<std::string>()->default_value(""), "private_key_path")
@@ -145,10 +145,13 @@ int main(int argc, char *argv[]) {
                           net::detached);
 
         }
-        std::cout << "Server started" << std::endl;
+        std::cout << "Server started\n";
+
+        net::signal_set signals(ioContext, SIGINT, SIGTERM);
+        signals.async_wait([&ioContext](auto, auto) { ioContext.stop(); });
         ioContext.run();
     } catch (std::exception &e) {
-        std::cerr << "Exception: " << e.what() << "\n";
+        std::cerr << "Exception: " << e.what() << '\n';
     }
     return 0;
 }
@@ -263,9 +266,9 @@ net::awaitable<std::tuple<State, std::unique_ptr<tcp::socket>>> onRequest(const 
                 std::to_string(ntohs(targetPort)),
                 net::as_tuple(net::use_awaitable));
         if (error) {
-            std::cerr << hostName << "-" << error.message() << std::endl;
+            std::cerr << hostName << "-" << error.message() << '\n';
             replyCode = ReplyCode::HostUnreachable;
-        } else if (!endpoints.empty()) {
+        } else {
             targetEndpoint = *endpoints.begin();
         }
     } else {
@@ -280,18 +283,18 @@ net::awaitable<std::tuple<State, std::unique_ptr<tcp::socket>>> onRequest(const 
             targetSocket = std::make_unique<tcp::socket>(executor);
             const auto [error] = co_await targetSocket->async_connect(*targetEndpoint,
                                                                       net::as_tuple(net::use_awaitable));
+            switch (error.value()) {
+                case net::error::network_unreachable:
+                    replyCode = ReplyCode::NetworkUnreachable;
+                    break;
+                case net::error::connection_refused:
+                    replyCode = ReplyCode::ConnectionRefused;
+                    break;
+                default:
+                    break;
+            }
             if (error) {
-                switch (error.value()) {
-                    case net::error::network_unreachable:
-                        replyCode = ReplyCode::NetworkUnreachable;
-                        break;
-                    case net::error::connection_refused:
-                        replyCode = ReplyCode::ConnectionRefused;
-                        break;
-                    default:
-                        break;
-                }
-                std::cerr << *targetEndpoint << "-" << error.message() << std::endl;
+                std::cerr << *targetEndpoint << "-" << error.message() << '\n';
             }
         } else {
             replyCode = ReplyCode::CommandNotSupported;
@@ -418,7 +421,7 @@ net::awaitable<void> listenSsl(std::unique_ptr<tcp::acceptor> acceptor,
                               startSession(std::move(sslClientSocket), username, password),
                               net::detached);
             } else {
-                std::cerr << "Handshake error: " << handshakeError.message() << std::endl;
+                std::cerr << "Handshake error: " << handshakeError.message() << '\n';
             }
         } else {
             std::cerr << "Accept failed: " << error.message() << "\n";
