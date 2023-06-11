@@ -5,11 +5,56 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "(gdb) Launch",
+            "name": "(gdb) Launch ssl_tunnel",
             "type": "cppdbg",
             "request": "launch",
             "program": "${command:cmake.launchTargetPath}",
-            "args": [],
+            "args": [
+                "--port",
+                10800,
+                "--socks5_server_addr",
+                "127.0.0.1",
+                "--socks5_server_port",
+                10801,
+                "--cert_path",
+                "../../cert.pem",
+                "--http_port",
+                10802],
+            "stopAtEntry": false,
+            "cwd": "${command:cmake.launchTargetDirectory}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "Set Disassembly Flavor to Intel",
+                    "text": "-gdb-set disassembly-flavor intel",
+                    "ignoreFailures": true
+                }
+            ]
+        },
+        {
+            "name": "(gdb) Launch socks5_server",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${command:cmake.launchTargetPath}",
+            "args": [
+                "--port",
+                1080,
+                "--ssl_port",
+                10801,
+                "--cert_path",
+                "../cert.pem",
+                "--private_key_path",
+                "../private_key.pem",
+                "--dh_key_path",
+                "../dh_key.pem"
+            ],
             "stopAtEntry": false,
             "cwd": "${command:cmake.launchTargetDirectory}",
             "environment": [],

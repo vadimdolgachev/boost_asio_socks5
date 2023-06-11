@@ -27,8 +27,10 @@ openssl dhparam -dsaparam -out dh_key.pem 4096
 ```
 
 ## Rfc
-https://www.rfc-editor.org/rfc/rfc1928
+https://www.ietf.org/rfc/rfc1928
 
-https://www.rfc-editor.org/rfc/rfc1929
+https://www.ietf.org/rfc/rfc1929
 
-https://www.rfc-editor.org/rfc/rfc1961
+https://www.ietf.org/rfc/rfc1961
+
+https://www.ietf.org/rfc/rfc2817

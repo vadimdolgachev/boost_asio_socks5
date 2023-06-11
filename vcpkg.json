@@ -5,6 +5,7 @@
   "dependencies": [
     "boost-asio",
     "boost-program-options",
+    "boost-url",
     {
       "name": "openssl",
       "version>=": "3.0.2"

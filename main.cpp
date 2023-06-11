@@ -20,6 +20,8 @@
 #include <string_view>
 #include <unordered_set>
 
+#include "common.h"
+
 namespace po = boost::program_options;
 
 namespace net = boost::asio;
@@ -27,10 +29,6 @@ namespace net = boost::asio;
 using net::ip::tcp;
 
 using Buffer = std::array<std::uint8_t, 4 * 1024>;
-
-constexpr std::uint8_t SOCKS_VER = 5;
-constexpr std::uint8_t RESERVED_FIELD = 0;
-constexpr std::uint8_t AUTH_METHOD_VERSION = 1;
 
 template<typename ValType, typename EnumType>
 concept isEnumType = std::same_as<ValType, std::underlying_type_t<EnumType>>;
@@ -59,41 +57,10 @@ enum class State {
     EndOfSession
 };
 
-enum AuthMethod : std::uint8_t {
-    NoAuthRequired = 0,
-    GSSAPI = 1,
-    UsernamePassword = 2
-};
-using AuthMethodCheck = EnumCheck<AuthMethod,
-        AuthMethod::UsernamePassword,
-        AuthMethod::NoAuthRequired,
-        AuthMethod::GSSAPI>;
-
-enum AuthStatusReply : std::uint8_t {
-    Successful = 0,
-    Failure = 1
-};
-
-enum CmdType : std::uint8_t {
-    Connect = 1,
-    Bind = 2,
-    Udp = 3
-};
-
-enum AddressType : std::uint8_t {
-    IpV4 = 1,
-    IpV6 = 4,
-    DomainName = 3,
-};
-
-enum ReplyCode : std::uint8_t {
-    Succeeded = 0,
-    NetworkUnreachable = 3,
-    HostUnreachable = 4,
-    ConnectionRefused = 5,
-    CommandNotSupported = 7,
-    AddressTypeNotSupported = 8
-};
+using AuthMethodCheck = EnumCheck<socks5::AuthMethod,
+        socks5::AuthMethod::UsernamePassword,
+        socks5::AuthMethod::NoAuthRequired,
+        socks5::AuthMethod::GSSAPI>;
 
 net::awaitable<void> listen(std::unique_ptr<tcp::acceptor> acceptor,
                             const std::string &username,
@@ -162,13 +129,13 @@ net::awaitable<void> transfer(ReadableSocketType &readableSocket, WritableSocket
     for (;;) {
         const auto [readError, readLength] = co_await readableSocket.async_read_some(net::buffer(data),
                                                                                      net::as_tuple(net::use_awaitable));
-        if (readError == net::error::eof) {
+        if (readError == net::error::eof || readError == boost::system::errc::operation_canceled) {
             break;
         }
         const auto [writeError, writeLength] = co_await net::async_write(writableSocket,
                                                                          net::buffer(data, readLength),
                                                                          net::as_tuple(net::use_awaitable));
-        if (writeError == net::error::eof) {
+        if (writeError == net::error::eof || writeError == boost::system::errc::operation_canceled) {
             break;
         }
     }
@@ -177,7 +144,7 @@ net::awaitable<void> transfer(ReadableSocketType &readableSocket, WritableSocket
 std::tuple<State, std::size_t> onGreeting(Buffer &data, const std::size_t length, const bool isEmptyUsername) {
     constexpr std::size_t minLength = 3;
     std::size_t cursor = 0;
-    if (length < minLength || data[cursor] != SOCKS_VER) {
+    if (length < minLength || data[cursor] != socks5::VERSION) {
         return std::make_tuple(State::EndOfSession, 0);
     }
     cursor += 1;
@@ -186,20 +153,20 @@ std::tuple<State, std::size_t> onGreeting(Buffer &data, const std::size_t length
         return std::make_tuple(State::EndOfSession, 0);
     }
 
-    std::unordered_set<AuthMethod> authMethods;
+    std::unordered_set<socks5::AuthMethod> authMethods;
     for (std::size_t i = 0; i < authMethodLength; ++i) {
         cursor += 1;
         if (const auto value = data[cursor]; AuthMethodCheck::isValue(value)) {
-            authMethods.insert(static_cast<AuthMethod>(value));
+            authMethods.insert(static_cast<socks5::AuthMethod>(value));
         }
     }
 
-    const auto selectedAuthMethod = authMethods.contains(AuthMethod::UsernamePassword) || !isEmptyUsername
-                                    ? AuthMethod::UsernamePassword : AuthMethod::NoAuthRequired;
+    const auto selectedAuthMethod = authMethods.contains(socks5::AuthMethod::UsernamePassword) || !isEmptyUsername
+                                    ? socks5::AuthMethod::UsernamePassword : socks5::AuthMethod::NoAuthRequired;
     constexpr std::size_t responseLength = 2;
-    data[0] = SOCKS_VER;
+    data[0] = socks5::VERSION;
     data[1] = selectedAuthMethod;
-    return std::make_tuple(selectedAuthMethod == AuthMethod::UsernamePassword
+    return std::make_tuple(selectedAuthMethod == socks5::AuthMethod::UsernamePassword
                            ? State::UserPassRequest : State::Request, responseLength);
 }
 
@@ -208,7 +175,7 @@ std::tuple<State, std::size_t> onUserPassRequest(Buffer &data,
                                                  const std::string &username,
                                                  const std::string &password) {
     std::size_t cursor = 0;
-    if (data[cursor] != AUTH_METHOD_VERSION) {
+    if (data[cursor] != socks5::AUTH_METHOD_VERSION) {
         return std::make_tuple(State::EndOfSession, 0);
     }
     cursor += 1;
@@ -229,33 +196,33 @@ std::tuple<State, std::size_t> onUserPassRequest(Buffer &data,
     const std::string_view clientPassword(reinterpret_cast<char *>(&data[cursor]), clientPasswordLength);
 
     constexpr std::size_t responseLength = 2;
-    data[0] = AUTH_METHOD_VERSION;
-    data[1] = (username == clientUsername && (password.empty() || password == clientPassword))
-              ? AuthStatusReply::Successful : AuthStatusReply::Failure;
-    return std::make_tuple(State::Request, responseLength);
+    data[0] = socks5::AUTH_METHOD_VERSION;
+    const bool isSuccessful = (username == clientUsername && (password.empty() || password == clientPassword));
+    data[1] = isSuccessful ? socks5::AuthStatusReply::Successful : socks5::AuthStatusReply::Failure;
+    return std::make_tuple(isSuccessful ? State::Request : State::EndOfSession, responseLength);
 }
 
 net::awaitable<std::tuple<State, std::unique_ptr<tcp::socket>>> onRequest(const tcp::socket::executor_type &executor,
                                                                           const tcp::endpoint &serverEndpoint,
                                                                           Buffer &data,
                                                                           std::size_t &length) {
-    if (data[0] != SOCKS_VER) {
+    if (data[0] != socks5::VERSION) {
         co_return std::make_tuple(State::EndOfSession, nullptr);
     }
 
     constexpr std::size_t REPLY_LENGTH = 10;
     std::optional<tcp::endpoint> targetEndpoint;
-    auto replyCode = ReplyCode::Succeeded;
+    auto replyCode = socks5::ReplyCode::Succeeded;
 
     const auto addressType = data[3];
-    if (addressType == AddressType::IpV4) {
+    if (addressType == socks5::AddressType::IpV4) {
         net::ip::port_type targetPort = 0;
         std::memcpy(&targetPort, &data[8], sizeof(targetPort));
         targetEndpoint = tcp::endpoint(net::ip::address_v4({data[4],
                                                             data[5],
                                                             data[6],
                                                             data[7]}), ntohs(targetPort));
-    } else if (addressType == AddressType::DomainName) {
+    } else if (addressType == socks5::AddressType::DomainName) {
         const std::size_t hostNameLength = data[4];
         tcp::resolver resolver(executor);
         net::ip::port_type targetPort = 0;
@@ -267,28 +234,28 @@ net::awaitable<std::tuple<State, std::unique_ptr<tcp::socket>>> onRequest(const 
                 net::as_tuple(net::use_awaitable));
         if (error) {
             std::cerr << hostName << "-" << error.message() << '\n';
-            replyCode = ReplyCode::HostUnreachable;
+            replyCode = socks5::ReplyCode::HostUnreachable;
         } else {
             targetEndpoint = *endpoints.begin();
         }
     } else {
-        replyCode = ReplyCode::AddressTypeNotSupported;
+        replyCode = socks5::ReplyCode::AddressTypeNotSupported;
     }
 
     std::unique_ptr<tcp::socket> targetSocket = nullptr;
 
     if (targetEndpoint) {
         const auto cmdType = data[1];
-        if (cmdType == CmdType::Connect) {
+        if (cmdType == socks5::CmdType::Connect) {
             targetSocket = std::make_unique<tcp::socket>(executor);
             const auto [error] = co_await targetSocket->async_connect(*targetEndpoint,
                                                                       net::as_tuple(net::use_awaitable));
             switch (error.value()) {
                 case net::error::network_unreachable:
-                    replyCode = ReplyCode::NetworkUnreachable;
+                    replyCode = socks5::ReplyCode::NetworkUnreachable;
                     break;
                 case net::error::connection_refused:
-                    replyCode = ReplyCode::ConnectionRefused;
+                    replyCode = socks5::ReplyCode::ConnectionRefused;
                     break;
                 default:
                     break;
@@ -297,16 +264,14 @@ net::awaitable<std::tuple<State, std::unique_ptr<tcp::socket>>> onRequest(const 
                 std::cerr << *targetEndpoint << "-" << error.message() << '\n';
             }
         } else {
-            replyCode = ReplyCode::CommandNotSupported;
+            replyCode = socks5::ReplyCode::CommandNotSupported;
         }
-    } else {
-        co_return std::make_tuple(State::EndOfSession, nullptr);
     }
 
-    data[0] = SOCKS_VER;
+    data[0] = socks5::VERSION;
     data[1] = replyCode;
-    data[2] = RESERVED_FIELD;
-    data[3] = AddressType::IpV4;
+    data[2] = socks5::RESERVED_FIELD;
+    data[3] = socks5::AddressType::IpV4;
 
     const auto addrBytes = serverEndpoint.address().to_v4().to_bytes();
     static_assert(std::size(addrBytes) == 4);
@@ -317,19 +282,20 @@ net::awaitable<std::tuple<State, std::unique_ptr<tcp::socket>>> onRequest(const 
     std::memcpy(&data[8], &serverPort, sizeof(serverPort));
 
     length = REPLY_LENGTH;
-    co_return std::make_tuple(State::Transfer, std::move(targetSocket));
+    co_return std::make_tuple(replyCode == socks5::ReplyCode::Succeeded ? State::Transfer : State::EndOfSession,
+                              std::move(targetSocket));
 }
 
 template<typename SocketType>
-net::awaitable<State> onTransfer(SocketType &clientSocket,
+net::awaitable<std::tuple<State, std::size_t>> onTransfer(SocketType &clientSocket,
                                  tcp::socket &targetSocket,
                                  const Buffer &data,
                                  const std::size_t length) {
     using namespace net::experimental::awaitable_operators;
 
     co_await net::async_write(targetSocket, net::buffer(data, length), net::use_awaitable);
-    co_await (transfer(clientSocket, targetSocket) && transfer(targetSocket, clientSocket));
-    co_return State::EndOfSession;
+    co_await (transfer(clientSocket, targetSocket) || transfer(targetSocket, clientSocket));
+    co_return std::make_tuple(State::EndOfSession, 0);
 }
 
 template<typename SocketType>
@@ -373,16 +339,17 @@ net::awaitable<void> startSession(SocketType client,
                     std::tie(state, length) = onUserPassRequest(data, length, username, password);
                     break;
                 case State::Transfer:
-                    state = targetSocket ? co_await onTransfer(client, *targetSocket, data, length)
-                                         : State::EndOfSession;
+                    std::tie(state, length) = targetSocket ? co_await onTransfer(client, *targetSocket, data, length)
+                                         : std::make_tuple(State::EndOfSession, static_cast<std::size_t>(0));
                     break;
                 default:
                     break;
             }
 
-            if (state != State::EndOfSession) {
+            if (length > 0) {
                 co_await net::async_write(client, net::buffer(data, length), net::use_awaitable);
-            } else {
+            }
+            if (state == State::EndOfSession) {
                 break;
             }
         }

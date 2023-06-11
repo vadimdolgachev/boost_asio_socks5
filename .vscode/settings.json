@@ -1,6 +1,6 @@
 {
     "cmake.configureSettings": {
-        "CMAKE_TOOLCHAIN_FILE": "${env:VCPKG_HOME}/scripts/buildsystems/vcpkg.cmake"
+        "CMAKE_TOOLCHAIN_FILE": "${env:VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
     },
     "files.associations": {
         "tuple": "cpp",
@@ -81,5 +81,18 @@
         "typeinfo": "cpp",
         "variant": "cpp",
         "unordered_set": "cpp"
-    }
+    },
+    "cmake.configureArgs": [
+        "-DVCPKG_APPLOCAL_DEPS=ON",
+        "-DX_VCPKG_APPLOCAL_DEPS_INSTALL=ON",
+        "-DVCPKG_TARGET_TRIPLET=x64-linux",
+        "-DVCPKG_MANIFEST_MODE=ON"
+    ],
+    "vcpkg.general.enable": true,
+    "vcpkg.target.hostTriplet": "x64-linux",
+    "vcpkg.target.defaultTriplet": "x64-linux",
+    "vcpkg.target.useStaticLib": false,
+    "vcpkg.target.installDependencies": true,
+    "vcpkg.target.preferSystemLibs": false,
+    "vcpkg.target.useManifest": true
 }
