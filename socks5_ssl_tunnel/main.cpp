@@ -31,7 +31,7 @@ constexpr std::string_view CONNECT_RESPONSE_OK = "HTTP/1.1 200 OK\r\n\r\n";
 
 net::awaitable<void> listenSocksProxy(std::unique_ptr<tcp::acceptor> acceptor,
                                       const std::string &socksAddr,
-                                      const std::uint16_t socks5Port,
+                                      std::uint16_t socksPort,
                                       const std::string &certPath);
 
 net::awaitable<void> listenHttpProxy(std::unique_ptr<tcp::acceptor> acceptor,
