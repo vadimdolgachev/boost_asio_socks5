@@ -1,5 +1,24 @@
 ## boost_asio_socks5
 
+```
++------------------+
+| socks5 client    |
++------------------+   
+                       *                       
+                         *              
+                           *
+                             +-------------------+       +---------------+   
+                             | socks5 ssl tunnel | * * * | socks5 server |  
+                             +-------------------+       +---------------+
+                           *
+                         *
+                       *
++------------------+   
+| http proxy       |
++------------------+
+
+```
+
 ## Build
 ```bash
 cmake -DCMAKE_TOOLCHAIN_FILE=${VCPKG_HOME}/scripts/buildsystems/vcpkg.cmake -S. -B./build -G Ninja && cmake --build ./build
@@ -16,6 +35,11 @@ curl --socks5-hostname 127.0.0.1:10800 https://ident.me
 
 ```bash 
 curl --socks5 user:pass@127.0.0.1:10800 http://ident.me
+```
+
+### http proxy
+```bash 
+curl -x 127.0.0.1:10802 https://ident.me
 ```
 
 ## Creating ssl keys
