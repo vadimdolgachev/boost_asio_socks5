@@ -23,7 +23,7 @@ namespace net = boost::asio;
 
 using net::ip::tcp;
 
-using Buffer = std::array<std::uint8_t, 4 * 1024>;
+using Buffer = std::vector<std::uint8_t>;
 
 namespace po = boost::program_options;
 
@@ -84,23 +84,6 @@ int main(int argc, char *argv[]) {
     return 0;
 }
 
-template<typename ReadableSocketType, typename WritableSocketType>
-net::awaitable<void> transfer(ReadableSocketType &readableSocket, WritableSocketType &writableSocket) {
-    Buffer data = {};
-    for (;;) {
-        const auto [readError, readLength] = co_await readableSocket.async_read_some(net::buffer(data),
-                                                                                     net::as_tuple(net::use_awaitable));
-        if (readError) {
-            break;
-        }
-        const auto [writeError, writeLength] = co_await net::async_write(writableSocket, net::buffer(data, readLength),
-                                                                         net::as_tuple(net::use_awaitable));
-        if (writeError) {
-            break;
-        }
-    }
-}
-
 net::awaitable<void> startSocksSession(tcp::socket clientSocket,
                                        const std::string &socksAddr,
                                        const std::uint16_t socksPort,
@@ -157,11 +140,15 @@ net::awaitable<void> listenSocksProxy(std::unique_ptr<tcp::acceptor> acceptor,
     }
 }
 
-net::awaitable<net::ssl::stream<tcp::socket>> makeProxyConnection(const std::string_view host,
-                                                const std::uint16_t port,
-                                                const tcp::endpoint &socksProxyEndpoint,
-                                                const std::string &certPath,
-                                                net::any_io_executor executor) {
+net::awaitable<net::ssl::stream<tcp::socket>> makeProxyConnection(const std::string_view targetHost,
+                                                                  const std::uint16_t targetPort,
+                                                                  const tcp::endpoint &socksProxyEndpoint,
+                                                                  const std::string &certPath,
+                                                                  const tcp::socket::executor_type &executor) {
+    if (targetHost.size() > 0xFF) {
+        throw std::runtime_error("Hostname exceeds 255 characters");
+    }
+
     tcp::socket socksSocket(executor);
     co_await socksSocket.async_connect(socksProxyEndpoint, net::use_awaitable);
 
@@ -179,20 +166,21 @@ net::awaitable<net::ssl::stream<tcp::socket>> makeProxyConnection(const std::str
         throw std::runtime_error("Socks handshake error: " + handshakeError.message());
     }
 
+    Buffer buffer(1024);
     // greeting
-    Buffer buffer;
     std::size_t cursor = 0;
     buffer[cursor] = socks5::VERSION;
     ++cursor;
     buffer[cursor] = 1; // size of authentication methods
     ++cursor;
     buffer[cursor] = socks5::AuthMethod::NoAuthRequired;
-    co_await sslSocket.async_write_some(net::buffer(buffer, cursor + 1),
-                                     net::use_awaitable);
+    co_await net::async_write(sslSocket,
+                              net::buffer(buffer, cursor + 1),
+                              net::use_awaitable);
 
     // check greeting response
     if (const std::size_t length = co_await sslSocket.async_read_some(net::buffer(buffer),
-                                                                   net::use_awaitable);
+                                                                      net::use_awaitable);
             length != 2 || buffer[0] != socks5::VERSION || buffer[1] != socks5::AuthMethod::NoAuthRequired) {
         throw std::runtime_error("Socks authentication error");
     }
@@ -207,20 +195,23 @@ net::awaitable<net::ssl::stream<tcp::socket>> makeProxyConnection(const std::str
     ++cursor;
     buffer[cursor] = socks5::AddressType::DomainName; // address type
     ++cursor;
-    buffer[cursor] = host.size();
+    buffer[cursor] = targetHost.size();
     ++cursor;
-    std::copy(host.begin(), host.end(), &buffer[cursor]);
-    cursor += host.size();
-    const std::uint16_t networkPort = htons(port);
+    std::copy(targetHost.begin(), targetHost.end(), &buffer[cursor]);
+    cursor += targetHost.size();
+    const std::uint16_t networkPort = htons(targetPort);
     std::memcpy(&buffer[cursor], &networkPort, sizeof(networkPort));
     cursor += sizeof(networkPort);
-    co_await sslSocket.async_write_some(net::buffer(buffer, cursor),
-                                     net::use_awaitable);
+    co_await net::async_write(sslSocket,
+                              net::buffer(buffer, cursor),
+                              net::use_awaitable);
 
     // check request response
     const std::size_t length = co_await sslSocket.async_read_some(net::buffer(buffer),
-                                                               net::use_awaitable);
-    if (length != 10 || buffer[0] != socks5::VERSION || buffer[1] != socks5::ReplyCode::Succeeded) {
+                                                                  net::use_awaitable);
+    if (length != socks5::REPLY_LENGTH_FOR_REQUEST
+        || buffer[0] != socks5::VERSION
+        || buffer[1] != socks5::ReplyCode::Succeeded) {
         throw std::runtime_error("Socks connection error");
     }
     co_return sslSocket;
@@ -245,7 +236,7 @@ net::awaitable<void> startHttpProxySession(tcp::socket clientSocket,
 
         if (methodParams.size() > 2) {
             const std::string_view methodName = methodParams[0];
-            const std::string_view uri = {methodParams[1].begin(), methodParams[1].end()};
+            const std::string_view uri = methodParams[1];
 //            std::cout << "Uri=" << uri << '\n';
 //            const auto protocolVersion = methodParams[2];
 
@@ -253,13 +244,14 @@ net::awaitable<void> startHttpProxySession(tcp::socket clientSocket,
                 std::vector<std::string_view> hostPort;
                 boost::algorithm::split(hostPort, uri, boost::is_any_of(":"));
                 if (hostPort.size() == 2) {
-                    co_await clientSocket.async_write_some(net::buffer(CONNECT_RESPONSE_OK),
-                                                           net::use_awaitable);
-                    const std::string_view host = hostPort[0];
-                    std::uint16_t port = 0;
-                    std::from_chars(hostPort[1].begin(), hostPort[1].end(), port);
-                    auto socksSocket = co_await makeProxyConnection(host,
-                                                                    port,
+                    co_await net::async_write(clientSocket,
+                                              net::buffer(CONNECT_RESPONSE_OK),
+                                              net::use_awaitable);
+                    const std::string_view targetHost = hostPort[0];
+                    std::uint16_t targetPort = 0;
+                    std::from_chars(hostPort[1].begin(), hostPort[1].end(), targetPort);
+                    auto socksSocket = co_await makeProxyConnection(targetHost,
+                                                                    targetPort,
                                                                     socksProxyEndpoint,
                                                                     certPath,
                                                                     clientSocket.get_executor());
@@ -268,16 +260,16 @@ net::awaitable<void> startHttpProxySession(tcp::socket clientSocket,
                 }
             } else {
                 const boost::urls::url_view url(uri);
-                const std::string host = url.host();
-                const std::uint16_t port = url.has_port() ? url.port_number() : 80;
-                auto socksSocket = co_await makeProxyConnection(host,
-                                                                port,
+                const std::string targetHost = url.host();
+                const std::uint16_t targetPort = url.has_port() ? url.port_number() : 80;
+                auto socksSocket = co_await makeProxyConnection(targetHost,
+                                                                targetPort,
                                                                 socksProxyEndpoint,
                                                                 certPath,
                                                                 clientSocket.get_executor());
-                co_await socksSocket.async_write_some(
-                        net::buffer(httpRequest, httpRequestLength),
-                        net::use_awaitable);
+                co_await net::async_write(socksSocket,
+                                          net::buffer(httpRequest, httpRequestLength),
+                                          net::use_awaitable);
                 co_await transfer(socksSocket, clientSocket);
             }
         }

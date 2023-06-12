@@ -28,7 +28,7 @@ namespace net = boost::asio;
 
 using net::ip::tcp;
 
-using Buffer = std::array<std::uint8_t, 4 * 1024>;
+using Buffer = std::vector<std::uint8_t>;
 
 template<typename ValType, typename EnumType>
 concept isEnumType = std::same_as<ValType, std::underlying_type_t<EnumType>>;
@@ -123,24 +123,6 @@ int main(int argc, char *argv[]) {
     return 0;
 }
 
-template<typename ReadableSocketType, typename WritableSocketType>
-net::awaitable<void> transfer(ReadableSocketType &readableSocket, WritableSocketType &writableSocket) {
-    Buffer data = {};
-    for (;;) {
-        const auto [readError, readLength] = co_await readableSocket.async_read_some(net::buffer(data),
-                                                                                     net::as_tuple(net::use_awaitable));
-        if (readError == net::error::eof || readError == boost::system::errc::operation_canceled) {
-            break;
-        }
-        const auto [writeError, writeLength] = co_await net::async_write(writableSocket,
-                                                                         net::buffer(data, readLength),
-                                                                         net::as_tuple(net::use_awaitable));
-        if (writeError == net::error::eof || writeError == boost::system::errc::operation_canceled) {
-            break;
-        }
-    }
-}
-
 std::tuple<State, std::size_t> onGreeting(Buffer &data, const std::size_t length, const bool isEmptyUsername) {
     constexpr std::size_t minLength = 3;
     std::size_t cursor = 0;
@@ -202,15 +184,14 @@ std::tuple<State, std::size_t> onUserPassRequest(Buffer &data,
     return std::make_tuple(isSuccessful ? State::Request : State::EndOfSession, responseLength);
 }
 
-net::awaitable<std::tuple<State, std::unique_ptr<tcp::socket>>> onRequest(const tcp::socket::executor_type &executor,
-                                                                          const tcp::endpoint &serverEndpoint,
-                                                                          Buffer &data,
-                                                                          std::size_t &length) {
+net::awaitable<std::tuple<State, std::unique_ptr<tcp::socket>, std::size_t>>
+onRequest(const tcp::socket::executor_type &executor,
+          const tcp::endpoint &serverEndpoint,
+          Buffer &data) {
     if (data[0] != socks5::VERSION) {
-        co_return std::make_tuple(State::EndOfSession, nullptr);
+        co_return std::make_tuple(State::EndOfSession, nullptr, 0);
     }
 
-    constexpr std::size_t REPLY_LENGTH = 10;
     std::optional<tcp::endpoint> targetEndpoint;
     auto replyCode = socks5::ReplyCode::Succeeded;
 
@@ -281,16 +262,16 @@ net::awaitable<std::tuple<State, std::unique_ptr<tcp::socket>>> onRequest(const 
     static_assert(sizeof(serverPort) == 2);
     std::memcpy(&data[8], &serverPort, sizeof(serverPort));
 
-    length = REPLY_LENGTH;
     co_return std::make_tuple(replyCode == socks5::ReplyCode::Succeeded ? State::Transfer : State::EndOfSession,
-                              std::move(targetSocket));
+                              std::move(targetSocket),
+                              socks5::REPLY_LENGTH_FOR_REQUEST);
 }
 
 template<typename SocketType>
 net::awaitable<std::tuple<State, std::size_t>> onTransfer(SocketType &clientSocket,
-                                 tcp::socket &targetSocket,
-                                 const Buffer &data,
-                                 const std::size_t length) {
+                                                          tcp::socket &targetSocket,
+                                                          const Buffer &data,
+                                                          const std::size_t length) {
     using namespace net::experimental::awaitable_operators;
 
     co_await net::async_write(targetSocket, net::buffer(data, length), net::use_awaitable);
@@ -313,7 +294,7 @@ net::awaitable<void> startSession(SocketType client,
                                   const std::string &username,
                                   const std::string &password) {
     State state = State::Greeting;
-    Buffer data = {};
+    Buffer data(4 * 1024);
     std::unique_ptr<tcp::socket> targetSocket;
 
     try {
@@ -331,16 +312,19 @@ net::awaitable<void> startSession(SocketType client,
                     std::tie(state, length) = onGreeting(data, length, username.empty());
                     break;
                 case State::Request:
-                    std::tie(state, targetSocket)
-                            = co_await onRequest(client.get_executor(), toTcpSocket(client).local_endpoint(), data,
-                                                 length);
+                    std::tie(state, targetSocket, length)
+                            = co_await onRequest(client.get_executor(), toTcpSocket(client).local_endpoint(), data);
                     break;
                 case State::UserPassRequest:
                     std::tie(state, length) = onUserPassRequest(data, length, username, password);
                     break;
                 case State::Transfer:
-                    std::tie(state, length) = targetSocket ? co_await onTransfer(client, *targetSocket, data, length)
-                                         : std::make_tuple(State::EndOfSession, static_cast<std::size_t>(0));
+                    if (targetSocket) {
+                        std::tie(state, length) = co_await onTransfer(client, *targetSocket, data, length);
+                    } else {
+                        state = State::EndOfSession;
+                        length = 0;
+                    }
                     break;
                 default:
                     break;
