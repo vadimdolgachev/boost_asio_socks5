@@ -3,17 +3,17 @@
 ```
 +------------------+
 | socks5 client    |
-+------------------+   
-                       *                       
-                         *              
++------------------+
+                       *
+                         *
                            *
-                             +-------------------+       +---------------+   
-                             | socks5 ssl tunnel | * * * | socks5 server |  
+                             +-------------------+       +---------------+
+                             | socks5 ssl tunnel | * * * | socks5 server |
                              +-------------------+       +---------------+
                            *
                          *
                        *
-+------------------+   
++------------------+
 | http proxy       |
 +------------------+
 
@@ -21,24 +21,26 @@
 
 ## Build
 ```bash
-cmake -DCMAKE_TOOLCHAIN_FILE=${VCPKG_HOME}/scripts/buildsystems/vcpkg.cmake -S. -B./build -G Ninja && cmake --build ./build
+cmake -DCMAKE_TOOLCHAIN_FILE=${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake -S. -B./build -G Ninja && cmake --build ./build
 ```
 
 ## Usage
-```bash 
+### As socks5 proxy:
+
+```bash
 curl --socks5 127.0.0.1:10800 http://ident.me
 ```
 
-```bash 
+```bash
 curl --socks5-hostname 127.0.0.1:10800 https://ident.me
 ```
 
-```bash 
+```bash
 curl --socks5 user:pass@127.0.0.1:10800 http://ident.me
 ```
 
-### http proxy
-```bash 
+### As http proxy:
+```bash
 curl -x 127.0.0.1:10802 https://ident.me
 ```
 

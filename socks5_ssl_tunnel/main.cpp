@@ -217,60 +217,138 @@ net::awaitable<net::ssl::stream<tcp::socket>> makeProxyConnection(const std::str
     co_return sslSocket;
 }
 
+net::awaitable<void> processHttpsRequest(const std::string_view uri,
+                                         tcp::socket clientSocket,
+                                         const tcp::endpoint &socksProxyEndpoint,
+                                         const std::string &certPath) {
+    std::vector<std::string_view> hostPort;
+    boost::algorithm::split(hostPort, uri, boost::is_any_of(":"));
+    if (hostPort.size() == 2) {
+        co_await net::async_write(clientSocket,
+                                  net::buffer(CONNECT_RESPONSE_OK),
+                                  net::use_awaitable);
+        const std::string_view targetHost = hostPort[0];
+        std::uint16_t targetPort = 0;
+        std::from_chars(hostPort[1].begin(), hostPort[1].end(), targetPort);
+        auto proxySocket = co_await makeProxyConnection(targetHost,
+                                                        targetPort,
+                                                        socksProxyEndpoint,
+                                                        certPath,
+                                                        clientSocket.get_executor());
+        using namespace net::experimental::awaitable_operators;
+        co_await (transfer(clientSocket, proxySocket) || transfer(proxySocket, clientSocket));
+    }
+}
+
+net::awaitable<void> processHttpRequest(const std::string_view uri,
+                                        const std::string_view httpMethod,
+                                        const std::string_view httpVersion,
+                                        tcp::socket clientSocket,
+                                        const tcp::endpoint &socksProxyEndpoint,
+                                        const std::string &certPath,
+                                        std::string httpRequestBody,
+                                        const std::size_t httpRequestLength) {
+    const boost::urls::url_view url(uri);
+    const std::string targetHost = url.host();
+    const std::uint16_t targetPort = url.has_port() ? url.port_number() : 80;
+    auto proxySocket = co_await makeProxyConnection(targetHost,
+                                                    targetPort,
+                                                    socksProxyEndpoint,
+                                                    certPath,
+                                                    clientSocket.get_executor());
+    auto headerPos = httpRequestBody.find_first_of('\n');
+    if (headerPos != std::string::npos) {
+        headerPos += 1;
+        // sending request line
+        co_await net::async_write(proxySocket,
+                                  net::buffer(std::string(httpMethod).append(" ")
+                                                      .append(url.path()).append(" ")
+                                                      .append(httpVersion).append("\r\n")),
+                                  net::use_awaitable);
+        // sending header
+        co_await net::async_write(proxySocket,
+                                  net::buffer(httpRequestBody.data() + headerPos,
+                                              httpRequestLength - headerPos),
+                                  net::use_awaitable);
+        // reading response
+        httpRequestBody.clear();
+        const std::size_t headerSize = co_await boost::asio::async_read_until(proxySocket,
+                                                                              net::dynamic_buffer(httpRequestBody),
+                                                                              "\r\n\r\n",
+                                                                              net::use_awaitable);
+        co_await net::async_write(clientSocket,
+                                  net::buffer(httpRequestBody),
+                                  net::as_tuple(net::use_awaitable));
+
+        if (httpMethod != "HEAD") {
+            std::vector<std::string_view> headers;
+            boost::algorithm::split(headers,
+                                    httpRequestBody,
+                                    boost::algorithm::is_any_of("\r\n"),
+                                    boost::token_compress_on);
+            std::size_t contentLength = 0;
+            if (const auto iter = std::find_if(headers.begin(), headers.end(),
+                                               [](const auto header) { return header.starts_with("Content-Length"); });
+                    iter != headers.end()) {
+                std::vector<std::string_view> contentLengthStr;
+                boost::algorithm::split(contentLengthStr,
+                                        *iter,
+                                        boost::algorithm::is_any_of(" :"),
+                                        boost::token_compress_on);
+                std::from_chars(contentLengthStr.at(1).begin(),
+                                contentLengthStr.at(1).end(),
+                                contentLength);
+            }
+            if (contentLength > 0) {
+                const auto bodyLength = static_cast<std::int64_t>(httpRequestBody.size() - headerSize);
+                const auto remainsRead = static_cast<std::int64_t>(contentLength) - bodyLength;
+                if (remainsRead > 0) {
+                    co_await transfer(proxySocket, clientSocket, remainsRead);
+                }
+            }
+        }
+    }
+}
+
 net::awaitable<void> startHttpProxySession(tcp::socket clientSocket,
                                            const tcp::endpoint &socksProxyEndpoint,
                                            const std::string &certPath) {
     try {
-        std::string httpRequest;
+        std::string httpRequestBody;
         const auto httpRequestLength = co_await boost::asio::async_read_until(clientSocket,
-                                                                              net::dynamic_buffer(httpRequest),
+                                                                              net::dynamic_buffer(httpRequestBody),
                                                                               "\r\n\r\n",
                                                                               net::use_awaitable);
+        std::string requestLine;
+        {
+            std::istringstream requestStream(httpRequestBody);
+            requestStream.unsetf(std::ios_base::skipws);
+            std::getline(requestStream, requestLine);
+            requestLine.erase(std::remove(requestLine.begin(), requestLine.end(), '\r'), requestLine.end());
+        }
+        std::vector<std::string_view> requestLineParams;
+        boost::algorithm::split(requestLineParams,
+                                requestLine,
+                                boost::algorithm::is_any_of(" "),
+                                boost::algorithm::token_compress_on);
 
-        std::istringstream requestStream(httpRequest);
-        requestStream.unsetf(std::ios_base::skipws);
-        std::string methodHeader;
-        std::getline(requestStream, methodHeader);
-        std::vector<std::string_view> methodParams;
-        boost::algorithm::split(methodParams, methodHeader, boost::algorithm::is_any_of(" "));
+        if (requestLineParams.size() > 2) {
+            const std::string_view httpMethod = requestLineParams[0];
+            const std::string_view uri = requestLineParams[1];
+            const std::string_view httpVersion = requestLineParams[2];
+            std::cout << "method=" << httpMethod << ", Uri=" << uri << '\n';
 
-        if (methodParams.size() > 2) {
-            const std::string_view methodName = methodParams[0];
-            const std::string_view uri = methodParams[1];
-//            std::cout << "Uri=" << uri << '\n';
-//            const auto protocolVersion = methodParams[2];
-
-            if (methodName == "CONNECT") {
-                std::vector<std::string_view> hostPort;
-                boost::algorithm::split(hostPort, uri, boost::is_any_of(":"));
-                if (hostPort.size() == 2) {
-                    co_await net::async_write(clientSocket,
-                                              net::buffer(CONNECT_RESPONSE_OK),
-                                              net::use_awaitable);
-                    const std::string_view targetHost = hostPort[0];
-                    std::uint16_t targetPort = 0;
-                    std::from_chars(hostPort[1].begin(), hostPort[1].end(), targetPort);
-                    auto socksSocket = co_await makeProxyConnection(targetHost,
-                                                                    targetPort,
-                                                                    socksProxyEndpoint,
-                                                                    certPath,
-                                                                    clientSocket.get_executor());
-                    using namespace net::experimental::awaitable_operators;
-                    co_await (transfer(clientSocket, socksSocket) || transfer(socksSocket, clientSocket));
-                }
+            if (httpMethod == "CONNECT") {
+                co_await processHttpsRequest(uri, std::move(clientSocket), socksProxyEndpoint, certPath);
             } else {
-                const boost::urls::url_view url(uri);
-                const std::string targetHost = url.host();
-                const std::uint16_t targetPort = url.has_port() ? url.port_number() : 80;
-                auto socksSocket = co_await makeProxyConnection(targetHost,
-                                                                targetPort,
-                                                                socksProxyEndpoint,
-                                                                certPath,
-                                                                clientSocket.get_executor());
-                co_await net::async_write(socksSocket,
-                                          net::buffer(httpRequest, httpRequestLength),
-                                          net::use_awaitable);
-                co_await transfer(socksSocket, clientSocket);
+                co_await processHttpRequest(uri,
+                                            httpMethod,
+                                            httpVersion,
+                                            std::move(clientSocket),
+                                            socksProxyEndpoint,
+                                            certPath,
+                                            std::move(httpRequestBody),
+                                            httpRequestLength);
             }
         }
     } catch (const std::exception &exception) {

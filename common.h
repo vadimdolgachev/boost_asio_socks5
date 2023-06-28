@@ -46,11 +46,15 @@ namespace socks5 {
 }  // namespace socks5
 
 template<typename ReadableSocketType, typename WritableSocketType>
-net::awaitable<void> transfer(ReadableSocketType &readableSocket, WritableSocketType &writableSocket) {
+net::awaitable<std::size_t> transfer(ReadableSocketType &readableSocket,
+                                     WritableSocketType &writableSocket,
+                                     const std::size_t maxReadSize = 0) {
     std::vector<std::uint8_t> data(4 * 1024);
+    std::size_t readBytes = 0;
     for (;;) {
         const auto [readError, readLength] = co_await readableSocket.async_read_some(net::buffer(data),
                                                                                      net::as_tuple(net::use_awaitable));
+        readBytes += readLength;
         if (readError == net::error::eof || readError == boost::system::errc::operation_canceled) {
             break;
         }
@@ -60,7 +64,11 @@ net::awaitable<void> transfer(ReadableSocketType &readableSocket, WritableSocket
         if (writeError == net::error::eof || writeError == boost::system::errc::operation_canceled) {
             break;
         }
+        if (maxReadSize > 0 && readBytes >= maxReadSize) {
+            break;
+        }
     }
+    co_return readBytes;
 }
 
 #endif //BOOST_ASIO_SOCKS5_COMMON_H
