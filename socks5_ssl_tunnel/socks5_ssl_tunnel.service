@@ -1,0 +1,15 @@
+[Unit]
+Description=socks5 ssl tunnel service
+
+[Service]
+Environment="SOCKS5_SERVER_ADDR="
+Environment="SOCKS5_SERVER_PORT=20801"
+Environment="HTTP_PORT=10802"
+After=network.target
+Type=simple
+Restart=always
+RestartSec=1
+ExecStart=/opt/boost_asio_socks5/socks5_ssl_tunnel --socks5_server_addr ${SOCKS5_SERVER_ADDR} --socks5_server_port ${SOCKS5_SERVER_PORT} --cert_path /opt/boost_asio_socks5/cert.pem --http_port ${HTTP_PORT}
+
+[Install]
+WantedBy=multi-user.target
