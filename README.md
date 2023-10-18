@@ -52,6 +52,24 @@ openssl req -x509 -newkey rsa:4096 -keyout private_key.pem -out cert.pem \
 openssl dhparam -dsaparam -out dh_key.pem 4096
 ```
 
+## systemd
+
+1. copy .service files to $HOME/.config/systemd/user/
+
+2. set the necessary environment variables in .service file
+
+## Client side
+```bash
+systemctl --user daemon-reload
+systemctl --user start socks5_ssl_tunnel.service
+```
+
+## Server side
+```bash
+systemctl --user daemon-reload
+systemctl --user start socks5_server.service
+```
+
 ## Rfc
 https://www.ietf.org/rfc/rfc1928
 

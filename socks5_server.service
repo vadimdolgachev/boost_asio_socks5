@@ -1,0 +1,16 @@
+[Unit]
+Description=socks5 service
+
+[Service]
+Environment="SSL_PORT=20801"
+Environment="CERT_PATH=/opt/boost_asio_socks5/cert.pem"
+Environment="PRIVATE_KEY_PATH=/opt/boost_asio_socks5/private_key.pem"
+Environment="DH_KEY_PATH=/opt/boost_asio_socks5/dh_key.pem"
+After=network.target
+Type=simple
+Restart=always
+RestartSec=1
+ExecStart=/opt/boost_asio_socks5/socks5_server --ssl_port ${SSL_PORT} --cert_path ${CERT_PATH} --private_key_path ${PRIVATE_KEY_PATH} --dh_key_path ${DH_KEY_PATH}
+
+[Install]
+WantedBy=multi-user.target

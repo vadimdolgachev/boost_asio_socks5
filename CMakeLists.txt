@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.26)
-project(boost_asio_socks5)
+project(socks5_server)
 
 find_package(OpenSSL REQUIRED)
 find_package(Boost REQUIRED COMPONENTS system program_options)
@@ -21,9 +21,9 @@ add_compile_definitions(
 
 add_subdirectory(socks5_ssl_tunnel)
 
-add_executable(boost_asio_socks5 main.cpp common.h)
-target_compile_options(boost_asio_socks5 PRIVATE ${COMPILE_FLAGS})
-target_link_libraries(boost_asio_socks5 PRIVATE
+add_executable(socks5_server main.cpp common.h)
+target_compile_options(socks5_server PRIVATE ${COMPILE_FLAGS})
+target_link_libraries(socks5_server PRIVATE
         OpenSSL::SSL
         OpenSSL::Crypto
         Boost::system
